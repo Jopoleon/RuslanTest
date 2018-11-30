@@ -3,93 +3,140 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
-	"mime"
 	"net/http"
 	"os"
-	"path/filepath"
 
+	"github.com/go-chi/chi"
 	"github.com/sirupsen/logrus"
 )
 
+//const maxUploadSize = 8 * 1024 * 1024 // 2 mb
+const uploadPath = "./tmp/"
+
 func main() {
-	http.HandleFunc("/upload", uploadFileHandler())
+	s := NewStorage(uploadPath)
+	r := chi.NewRouter()
+	r.Use(CrossControl)
+	fs := FileServer{s: s}
+	r.Post("/upload/", fs.UploadFile)
+	r.Handle("/files/", http.StripPrefix("/files", http.FileServer(http.Dir(uploadPath))))
 
-	fs := http.FileServer(http.Dir(uploadPath))
-	http.Handle("/files/", http.StripPrefix("/files", fs))
-
-	log.Print("Server started on localhost:8080, use /upload for uploading files and /files/{fileName} for downloading")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	//curl -i  -F 'uploadfile=@/home/egor/Work/Golang/src/github.com/Jopoleon/RuslanTest/1.jpg' http://localhost:8080/upload
+	logrus.Info("Server started on localhost:8080, use /upload for uploading files and /files/{fileName} for downloading")
+	log.Fatal(http.ListenAndServe(":8080", r))
 }
 
-const maxUploadSize = 8 * 1024 * 1024 // 2 mb
-const uploadPath = "./tmp"
+func CrossControl(next http.Handler) http.Handler {
+	fn := func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		}()
 
-func uploadFileHandler() http.HandlerFunc {
+		next.ServeHTTP(w, r)
+	}
+
+	return http.HandlerFunc(fn)
+}
+
+func uploadFileHandler2() http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// validate file size
-		r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
-		if err := r.ParseMultipartForm(maxUploadSize); err != nil {
-			renderError(w, "FILE_TOO_BIG", http.StatusBadRequest)
-			return
-		}
-
-		// parse and validate file and post parameters
-		fileType := r.PostFormValue("type")
-		file, _, err := r.FormFile("uploadFile")
+		r.ParseMultipartForm(32 << 20)
+		file, handler, err := r.FormFile("uploadfile")
 		if err != nil {
-			logrus.Error(err)
-			renderError(w, "INVALID_FILE", http.StatusBadRequest)
+			fmt.Println(err)
 			return
 		}
 		defer file.Close()
-		fileBytes, err := ioutil.ReadAll(file)
+		f, err := os.Create("./tmp/" + handler.Filename)
 		if err != nil {
-			logrus.Error(err)
-			renderError(w, "INVALID_FILE", http.StatusBadRequest)
+			fmt.Println(err)
 			return
 		}
-
-		// check file type, detectcontenttype only needs the first 512 bytes
-		filetype := http.DetectContentType(fileBytes)
-		switch filetype {
-		case "image/jpeg", "image/jpg":
-		case "image/gif", "image/png":
-		case "application/pdf":
-			break
-		default:
-			renderError(w, "INVALID_FILE_TYPE", http.StatusBadRequest)
-			return
-		}
-		fileName := randToken(12)
-		fileEndings, err := mime.ExtensionsByType(fileType)
-		if err != nil {
-			renderError(w, "CANT_READ_FILE_TYPE", http.StatusInternalServerError)
-			return
-		}
-		newPath := filepath.Join(uploadPath, fileName+fileEndings[0])
-		fmt.Printf("FileType: %s, File: %s\n", fileType, newPath)
-
-		// write file
-		newFile, err := os.Create(newPath)
-		if err != nil {
-			renderError(w, "CANT_WRITE_FILE", http.StatusInternalServerError)
-			return
-		}
-		defer newFile.Close() // idempotent, okay to call twice
-		if _, err := newFile.Write(fileBytes); err != nil || newFile.Close() != nil {
-			renderError(w, "CANT_WRITE_FILE", http.StatusInternalServerError)
-			return
-		}
+		defer f.Close()
+		fmt.Fprintf(w, "%v", handler.Header)
+		//f, err := os.OpenFile("./test/"+handler.Filename, os.O_WRONLY|os.O_CREATE, 0666)
+		//if strings.Contains(err.Error(),"no such file or directory") {
+		//	err := os.Mkdir("./test/"+handler.Filename, 0666)
+		//	if err != nil {
+		//		fmt.Println(err)
+		//		return
+		//	}
+		//} else {
+		//	fmt.Println(err)
+		//	return
+		//}
+		io.Copy(f, file)
 		w.Write([]byte("SUCCESS"))
 	})
+
 }
 
-func renderError(w http.ResponseWriter, message string, statusCode int) {
-	w.WriteHeader(http.StatusBadRequest)
-	w.Write([]byte(message))
-}
+//
+//func uploadFileHandler() http.HandlerFunc {
+//	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//		// validate file size
+//
+//		logrus.Info(r)
+//		r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+//		if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+//			httpError(w, "FILE_TOO_BIG \n", http.StatusBadRequest)
+//			return
+//		}
+//
+//		// parse and validate file and post parameters
+//		fileType := r.PostFormValue("type")
+//		file, _, err := r.FormFile("uploadFile")
+//		if err != nil {
+//			logrus.Error(err)
+//			httpError(w, "INVALID_FILE \n", http.StatusBadRequest)
+//			return
+//		}
+//		defer file.Close()
+//		fileBytes, err := ioutil.ReadAll(file)
+//		if err != nil {
+//			logrus.Error(err)
+//			httpError(w, "INVALID_FILE \n", http.StatusBadRequest)
+//			return
+//		}
+//
+//		// check file type, detectcontenttype only needs the first 512 bytes
+//		filetype := http.DetectContentType(fileBytes)
+//		switch filetype {
+//		case "image/jpeg", "image/jpg":
+//		case "image/gif", "image/png":
+//		case "application/pdf":
+//			break
+//		default:
+//			httpError(w, "INVALID_FILE_TYPE \n", http.StatusBadRequest)
+//			return
+//		}
+//		fileName := randToken(12)
+//		fileEndings, err := mime.ExtensionsByType(fileType)
+//		if err != nil {
+//			httpError(w, "CANT_READ_FILE_TYPE \n", http.StatusInternalServerError)
+//			return
+//		}
+//		newPath := filepath.Join(uploadPath, fileName+fileEndings[0])
+//		fmt.Printf("FileType: %s, File: %s\n", fileType, newPath)
+//
+//		// write file
+//		newFile, err := os.Create(newPath)
+//		if err != nil {
+//			httpError(w, "CANT_WRITE_FILE \n", http.StatusInternalServerError)
+//			return
+//		}
+//		defer newFile.Close() // idempotent, okay to call twice
+//		if _, err := newFile.Write(fileBytes); err != nil || newFile.Close() != nil {
+//			httpError(w, "CANT_WRITE_FILE \n", http.StatusInternalServerError)
+//			return
+//		}
+//		w.Write([]byte("SUCCESS"))
+//	})
+//}
 
 func randToken(len int) string {
 	b := make([]byte, len)
